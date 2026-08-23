@@ -1,27 +1,77 @@
-<!doctype html>
-<html lang="es">
-  <head>
-    <meta charset="UTF-8"/>
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover"/>
-    <title>NurseArt — Cuidados con tecnología</title>
-    <link rel="manifest" href="/manifest.json"/>
-    <meta name="theme-color" content="#2563EB"/>
-    <meta name="apple-mobile-web-app-capable" content="yes"/>
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent"/>
-    <meta name="apple-mobile-web-app-title" content="NurseArt"/>
-    <link rel="apple-touch-icon" href="/icons/icon-192.png"/>
-    <style>
-      *{box-sizing:border-box;margin:0;padding:0;}
-      body{margin:0;background:linear-gradient(135deg,#1e3a8a,#2563EB 50%,#0d9488);min-height:100vh;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;-webkit-font-smoothing:antialiased;}
-    </style>
-  </head>
-  <body>
-    <div id="root"></div>
-    <script type="module" src="/src/main.jsx"></script>
-    <script>
-      if('serviceWorker' in navigator){
-        window.addEventListener('load',()=>navigator.serviceWorker.register('/sw.js').catch(()=>{}));
+// Cloudflare Pages Function (diferente a Netlify Function)
+export async function onRequest(context) {
+  const url = new URL(context.request.url);
+  const query = (url.searchParams.get('q')||'').trim();
+  const cn = (url.searchParams.get('cn')||'').trim();
+
+  const headers = {
+    'Access-Control-Allow-Origin': '*',
+    'Content-Type': 'application/json',
+  };
+
+  if(context.request.method === 'OPTIONS'){
+    return new Response('', {status:200, headers});
+  }
+
+  if(!query && !cn){
+    return new Response(JSON.stringify({error:'Indica q o cn'}), {status:400, headers});
+  }
+
+  const CIMA = 'https://cima.aemps.es/cima/rest';
+
+  try {
+    if(cn){
+      const cnsToTry = [...new Set([cn, cn.replace(/^0+/,''), cn.padStart(6,'0')])];
+      for(const cnV of cnsToTry){
+        const res = await fetch(`${CIMA}/medicamento?cn=${encodeURIComponent(cnV)}`, {
+          headers:{'User-Agent':'NurseArt/1.0','Accept':'application/json'}
+        });
+        if(res.status === 200){
+          const m = await res.json();
+          if(m.nombre){
+            return new Response(JSON.stringify({
+              medicamentos:[normalizar(m)], total:1, source:'cima', cn:cnV
+            }), {headers});
+          }
+        }
       }
-    </script>
-  </body>
-</html>
+      return new Response(JSON.stringify({medicamentos:[], total:0}), {headers});
+    }
+
+    if(query.length < 2){
+      return new Response(JSON.stringify({error:'Mínimo 2 caracteres'}), {status:400, headers});
+    }
+
+    const res = await fetch(
+      `${CIMA}/medicamentos?nombre=${encodeURIComponent(query)}&pagina=1&itemsPerPagina=10`,
+      {headers:{'User-Agent':'NurseArt/1.0','Accept':'application/json'}}
+    );
+    if(!res.ok) throw new Error('CIMA '+res.status);
+    const data = await res.json();
+    return new Response(JSON.stringify({
+      medicamentos:(data.resultados||[]).map(normalizar),
+      total:data.totalFilas||0, source:'cima'
+    }), {headers});
+
+  } catch(err){
+    return new Response(JSON.stringify({error:'Error CIMA', detail:err.message}), {status:500, headers});
+  }
+}
+
+function normalizar(m){
+  const principioActivo=(m.principiosActivos||[]).map(p=>p.nombre).join(' + ')||'No especificado';
+  let fotoUrl=null;
+  if(Array.isArray(m.fotos)&&m.fotos.length>0){
+    const f=m.fotos.find(f=>f.tipo==='materialas')||m.fotos[0];
+    fotoUrl=f?.url||null;
+  }
+  const cn=(m.presentaciones?.[0]?.cn)||m.cn||null;
+  return{
+    nombre:m.nombre||'Desconocido', principioActivo,
+    lab:m.labtitular||'No especificado',
+    presentacion:m.formaFarmaceutica?.nombre||'',
+    nregistro:m.nregistro||null, cn,
+    efg:!!m.generico, receta:!!m.receta,
+    comercializado:m.comerc!==false, fotoUrl
+  };
+}
